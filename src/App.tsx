@@ -18,12 +18,16 @@ import {
   Zap,
   Lightbulb,
   Trash2,
-  CircleDot
+  CircleDot,
+  LogIn,
+  LogOut,
+  User,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { initializeApp } from 'firebase/app';
 import { getDatabase, ref, onValue, set, off } from 'firebase/database';
-import { getAuth, onAuthStateChanged, signInAnonymously } from 'firebase/auth';
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, User as FirebaseUser } from 'firebase/auth';
 
 // ---------- Firebase Config ----------
 const firebaseConfig = {
@@ -70,25 +74,34 @@ interface LogEntry {
 }
 
 export default function App() {
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+
   const [sensors, setSensors] = useState<Sensors>({ temperature: 0, humidity: 0, ammonia: 0, feedLevel: 0 });
   const [controls, setControls] = useState<Controls>({ fan: false, heater: false, led: false, feed: false, stepper1: false, stepper2: false });
   const [schedule, setSchedule] = useState<Schedule>({ egg_time: '08:00', stool_time: '09:00', feed_time: '07:00', led_on: '06:00', led_off: '18:00' });
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'schedule'>('dashboard');
 
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Auth setup
-    onAuthStateChanged(auth, (user) => {
-      if (user) {
-        setIsAuthenticated(true);
-        addLog("User authenticated successfully", "success");
-      } else {
-        signInAnonymously(auth).catch(err => addLog("Auth error: " + err.message, "error"));
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsLoading(false);
+      if (currentUser) {
+        addLog(`Welcome back, ${currentUser.email}`, "success");
       }
     });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
 
     // Real-time Listeners
     const sensorsRef = ref(db, 'sensors');
@@ -114,7 +127,22 @@ export default function App() {
       off(controlsRef);
       off(scheduleRef);
     };
-  }, []);
+  }, [user]);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError('');
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (err: any) {
+      setLoginError(err.message || 'Failed to login');
+    }
+  };
+
+  const handleLogout = () => {
+    signOut(auth);
+    addLog("Logged out of system", "info");
+  };
 
   const addLog = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
     const newLog: LogEntry = {
@@ -124,11 +152,6 @@ export default function App() {
       type
     };
     setLogs(prev => [newLog, ...prev].slice(0, 50));
-    
-    // Browser Notification
-    if ("Notification" in window && Notification.permission === "granted") {
-      new Notification("QuailSmart Update", { body: message });
-    }
   };
 
   const toggleDevice = (device: keyof Controls, currentState: boolean) => {
@@ -141,10 +164,7 @@ export default function App() {
   const triggerMomentary = (device: keyof Controls) => {
     set(ref(db, `controls/${device}`), true)
       .then(() => {
-        addLog(`Activated ${device.toUpperCase()}`, 'success');
-        setTimeout(() => {
-          set(ref(db, `controls/${device}`), false);
-        }, 5000);
+        addLog(`Triggered ${device.toUpperCase()}`, 'success');
       })
       .catch(err => addLog(`Failed to trigger ${device}: ${err.message}`, 'error'));
   };
@@ -162,19 +182,70 @@ export default function App() {
     return { label: 'FULL', color: 'text-emerald-500' };
   };
 
-  if (!isAuthenticated) {
+  if (isLoading) {
     return (
-      <div className="min-h-screen bg-[#0A0A0A] flex items-center justify-center p-4">
+      <div className="min-h-screen bg-[#0A0A0A] flex items-center justify-center">
+        <div className="w-10 h-10 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-[#0A0A0A] flex items-center justify-center p-6">
         <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-center space-y-4"
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="w-full max-w-md bg-zinc-900/50 border border-zinc-800 rounded-[2rem] p-8 backdrop-blur-xl"
         >
-          <div className="w-16 h-16 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto border border-emerald-500/30">
-            <Zap className="text-emerald-500 w-8 h-8" />
+          <div className="text-center mb-8">
+            <div className="w-16 h-16 bg-emerald-500 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-emerald-500/20 rotate-3">
+              <Zap className="text-black w-8 h-8" />
+            </div>
+            <h1 className="text-2xl font-bold text-white tracking-tight">QuailSmart Login</h1>
+            <p className="text-zinc-500 text-sm mt-2">Enter your credentials to access the farm.</p>
           </div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">QuailSmart</h1>
-          <p className="text-zinc-400 text-sm">Connecting to secure farm network...</p>
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 ml-1">Email Address</label>
+              <input 
+                type="email" 
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full bg-zinc-800/50 border border-zinc-700 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-emerald-500/50 transition-all"
+                placeholder="admin@quailsmart.com"
+                required
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-widest text-zinc-500 ml-1">Password</label>
+              <input 
+                type="password" 
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-zinc-800/50 border border-zinc-700 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-emerald-500/50 transition-all"
+                placeholder="••••••••"
+                required
+              />
+            </div>
+
+            {loginError && (
+              <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-3">
+                <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+                <p className="text-xs text-red-400 leading-tight">{loginError}</p>
+              </div>
+            )}
+
+            <button 
+              type="submit"
+              className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-4 rounded-2xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 mt-6"
+            >
+              <LogIn className="w-5 h-5" />
+              Sign In to Dashboard
+            </button>
+          </form>
         </motion.div>
       </div>
     );
@@ -208,16 +279,16 @@ export default function App() {
           </nav>
 
           <div className="flex items-center gap-4">
-            <div className="hidden md:flex flex-col items-end">
-              <span className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold">System Status</span>
-              <div className="flex items-center gap-1.5">
-                <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                <span className="text-xs text-emerald-500 font-medium">Online</span>
-              </div>
+            <div className="hidden md:flex flex-col items-end mr-2">
+              <span className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold">Logged in as</span>
+              <span className="text-xs text-zinc-300 font-medium">{user.email?.split('@')[0]}</span>
             </div>
-            <button className="p-2 hover:bg-zinc-800 rounded-full transition-colors relative">
-              <Bell className="w-5 h-5 text-zinc-400" />
-              <span className="absolute top-2 right-2 w-2 h-2 bg-emerald-500 rounded-full border-2 border-black" />
+            <button 
+              onClick={handleLogout}
+              className="p-2 hover:bg-red-500/10 hover:text-red-500 rounded-full transition-all"
+              title="Logout"
+            >
+              <LogOut className="w-5 h-5" />
             </button>
           </div>
         </div>
